@@ -18,7 +18,7 @@ from typing import Tuple, List, Callable, Any, Dict, Sequence, Optional
 
 import torch
 
-from openfold.utils.tensor_utils import(
+from tensor_utils import(
     tree_map,
     tensor_tree_map
 )

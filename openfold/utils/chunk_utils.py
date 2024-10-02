@@ -221,6 +221,10 @@ def chunk_layer(
     low_mem: bool = False,
     _out: Any = None,
     _add_into_out: bool = False,
+    select_chunk_fn_d: Optional[Dict[str, Callable]] = None,
+    orig_batch_dims: Optional[Dict[str, Tuple]] = None,
+    flat_batch_dim: Optional[int] = None,
+    og_batch_dim: Optional[Tuple] = None,
 ) -> Any:
     """
     Implements the "chunking" procedure described in section 1.11.8.
@@ -253,27 +257,36 @@ def chunk_layer(
     if not (len(inputs) > 0):
         raise ValueError("Must provide at least one input")
 
-    initial_dims = [shape[:no_batch_dims] for shape in _fetch_dims(inputs)]
-    orig_batch_dims = tuple([max(s) for s in zip(*initial_dims)])
+    if orig_batch_dims is None:
+        orig_batch_dims = {}
+        initial_dims = [shape[:no_batch_dims] for shape in _fetch_dims(inputs)]
+        for k in inputs.keys():
+            orig_batch_dims[k] = tuple([max(s) for s in zip(*initial_dims)])
+        og_batch_dim = tuple([max(s) for s in zip(*initial_dims)])
 
-    def _prep_inputs(t):
-        if(not low_mem):
-            if not sum(t.shape[:no_batch_dims]) == no_batch_dims:
-                t = t.expand(orig_batch_dims + t.shape[no_batch_dims:])
-            t = t.reshape(-1, *t.shape[no_batch_dims:])
-        else:
-            t = t.expand(orig_batch_dims + t.shape[no_batch_dims:])
-        return t
+    def _prep_inputs(t, batch_dim):
+            if(not low_mem):
+                if not sum(t.shape[:no_batch_dims]) == no_batch_dims:
+                    t = t.expand(batch_dim + t.shape[no_batch_dims:])
+                t = t.reshape(-1, *t.shape[no_batch_dims:])
+            else:
+                t = t.expand(batch_dim + t.shape[no_batch_dims:])
+            return t
+    prep_inputs_fn_d = {}
+    for k in inputs.keys():
+        prep_inputs_fn_d[k] = partial(_prep_inputs, batch_dim=orig_batch_dims[k])
 
-    prepped_inputs = tensor_tree_map(_prep_inputs, inputs)
+    # prepped_inputs = tensor_tree_map(_prep_inputs, inputs)
+    prepped_inputs = tensor_tree_map(prep_inputs_fn_d, inputs)
     prepped_outputs = None
     if(_out is not None):
         reshape_fn = lambda t: t.view([-1] + list(t.shape[no_batch_dims:]))
         prepped_outputs = tensor_tree_map(reshape_fn, _out)
 
-    flat_batch_dim = 1
-    for d in orig_batch_dims:
-        flat_batch_dim *= d
+    if flat_batch_dim is None:
+        flat_batch_dim = 1
+        for d in orig_batch_dims:
+            flat_batch_dim *= orig_batch_dims[d][0]
 
     no_chunks = flat_batch_dim // chunk_size + (
         flat_batch_dim % chunk_size != 0
@@ -284,9 +297,12 @@ def chunk_layer(
     for _ in range(no_chunks):
         # Chunk the input
         if(not low_mem):
-            select_chunk = (
-                lambda t: t[i : i + chunk_size] if t.shape[0] != 1 else t
-            )
+            if select_chunk_fn_d is None:
+                select_chunk = (
+                    lambda t: t[i : i + chunk_size] if t.shape[0] != 1 else t
+                )
+            else:
+                select_chunk = {k: partial(select_chunk_fn_d[k], i=i, chunk_size=chunk_size) for k in select_chunk_fn_d.keys()}
         else:
             select_chunk = (
                 partial(
@@ -337,7 +353,8 @@ def chunk_layer(
 
         i += chunk_size
 
-    reshape = lambda t: t.view(orig_batch_dims + t.shape[1:])
+    reshape = lambda t: t.view(og_batch_dim + t.shape[1:])
+    # reshape = lambda t: t.view(orig_batch_dims + t.shape[1:])
     out = tensor_tree_map(reshape, out)
 
     return out
